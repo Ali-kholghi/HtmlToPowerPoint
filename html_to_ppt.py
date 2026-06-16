@@ -28,28 +28,31 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             
-            # Use standard 16:9 widescreen dimensions for the browser viewport
+            # Widescreen 16:9 base viewport size
             viewport_width = 1920
             viewport_height = 1080
             
-            context = browser.new_context(viewport={"width": viewport_width, "height": viewport_height},
-                device_scale_factor=2
-                )
+            # OPTIMIZATION: Set device_scale_factor to 2.0 (like a Retina display)
+            # This renders text and details with double the pixel density for maximum sharpness.
+            context = browser.new_context(
+                viewport={"width": viewport_width, "height": viewport_height})
             page = context.new_page()
             
             status_callback("Loading HTML file...")
-            # Resolve the absolute local path to a file URI
             file_url = pathlib.Path(html_path).absolute().as_uri()
             page.goto(file_url, wait_until="networkidle")
             
-            # Allow dynamic content or local fonts a moment to load
-            time.sleep(1.0)
+            time.sleep(1.0)  # Give elements a second to finish any layout calculations
             
             screenshots = []
             
+            # OPTIMIZATION: Screenshot format is set to "jpeg" with a "quality" of 85.
+            # This prevents files from ballooning in size while maintaining clean, clear text.
+            screenshot_format = "jpeg"
+            screenshot_quality = 85
+            
             if mode == "scroll":
                 status_callback("Analyzing page height...")
-                # Scroll to the bottom first to trigger any lazy-loaded content
                 total_height = page.evaluate("() => document.body.scrollHeight")
                 current = 0
                 while current < total_height:
@@ -58,19 +61,22 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
                     current += 500
                     total_height = page.evaluate("() => document.body.scrollHeight")
                 
-                # Scroll back to top
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(0.5)
                 
-                # Capture screenshots viewport-by-viewport
                 current_scroll = 0
                 page_idx = 1
                 while current_scroll < total_height:
                     status_callback(f"Capturing vertical section {page_idx}...")
                     page.evaluate(f"window.scrollTo(0, {current_scroll})")
-                    time.sleep(0.5)  # Let any scrolling animations settle
+                    time.sleep(0.5)
                     
-                    img_bytes = page.screenshot(full_page=False)
+                    # Capture optimized JPEG instead of PNG
+                    img_bytes = page.screenshot(
+                        full_page=False, 
+                        type=screenshot_format, 
+                        quality=screenshot_quality
+                    )
                     screenshots.append(img_bytes)
                     
                     current_scroll += viewport_height
@@ -83,13 +89,16 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
                 
                 if count == 0:
                     status_callback("No <section> elements found. Falling back to Vertical Scroll...")
-                    # Fallback to scroll logic if no sections are present
                     total_height = page.evaluate("() => document.body.scrollHeight")
                     current_scroll = 0
                     while current_scroll < total_height:
                         page.evaluate(f"window.scrollTo(0, {current_scroll})")
                         time.sleep(0.5)
-                        img_bytes = page.screenshot(full_page=False)
+                        img_bytes = page.screenshot(
+                            full_page=False, 
+                            type=screenshot_format, 
+                            quality=screenshot_quality
+                        )
                         screenshots.append(img_bytes)
                         current_scroll += viewport_height
                 else:
@@ -98,7 +107,12 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
                         section = sections.nth(i)
                         section.scroll_into_view_if_needed()
                         time.sleep(0.5)
-                        img_bytes = section.screenshot()
+                        
+                        # Capture optimized JPEG instead of PNG
+                        img_bytes = section.screenshot(
+                            type=screenshot_format, 
+                            quality=screenshot_quality
+                        )
                         screenshots.append(img_bytes)
             
             browser.close()
@@ -109,20 +123,18 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
             status_callback("Assembling PowerPoint slides...")
             prs = Presentation()
             
-            # Configure presentation to standard widescreen (16:9)
             slide_width_in = 13.333
             slide_height_in = 7.5
             prs.slide_width = Inches(slide_width_in)
             prs.slide_height = Inches(slide_height_in)
             
-            blank_layout = prs.slide_layouts[6]  # Blank layout slide
+            blank_layout = prs.slide_layouts[6]
             
             for i, img_data in enumerate(screenshots):
                 status_callback(f"Adding slide {i+1} of {len(screenshots)}...")
                 slide = prs.slides.add_slide(blank_layout)
                 image_stream = io.BytesIO(img_data)
                 
-                # If Pillow is installed, calculate aspect ratio to center & fit without stretching
                 if has_pil:
                     img = Image.open(image_stream)
                     img_width, img_height = img.size
@@ -131,19 +143,17 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
                     img_ratio = img_width / img_height
                     
                     if img_ratio > slide_ratio:
-                        # Image is wider than slide ratio: fit to width, center vertically
                         display_width = slide_width_in
                         display_height = slide_width_in / img_ratio
                         left = 0
                         top = (slide_height_in - display_height) / 2
                     else:
-                        # Image is taller than slide ratio: fit to height, center horizontally
                         display_height = slide_height_in
                         display_width = slide_height_in * img_ratio
                         left = (slide_width_in - display_width) / 2
                         top = 0
                         
-                    image_stream.seek(0)  # Reset buffer position
+                    image_stream.seek(0)
                     slide.shapes.add_picture(
                         image_stream, 
                         Inches(left), 
@@ -152,7 +162,6 @@ def convert_html_to_pptx(html_path, ppt_path, mode, status_callback):
                         height=Inches(display_height)
                     )
                 else:
-                    # Fallback to full stretching if Pillow is missing
                     slide.shapes.add_picture(
                         image_stream, 
                         Inches(0), 
@@ -179,11 +188,9 @@ class App:
         self.root.geometry("550x300")
         self.root.resizable(False, False)
         
-        # Style configuration
         style = ttk.Style()
         style.theme_use('clam')
         
-        # UI Elements Container
         main_frame = ttk.Frame(root, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -240,7 +247,6 @@ class App:
             self.html_entry.delete(0, tk.END)
             self.html_entry.insert(0, file_path)
             
-            # Automatically suggest an output file name based on the HTML file name
             suggested_ppt = os.path.splitext(file_path)[0] + ".pptx"
             self.ppt_entry.delete(0, tk.END)
             self.ppt_entry.insert(0, suggested_ppt)
@@ -271,14 +277,12 @@ class App:
             messagebox.showerror("Error", "Please specify an output location.")
             return
             
-        # Disable inputs to prevent interaction during conversion
         self.convert_btn.config(state="disabled")
         self.browse_html_btn.config(state="disabled")
         self.browse_ppt_btn.config(state="disabled")
         self.scroll_radio.config(state="disabled")
         self.section_radio.config(state="disabled")
         
-        # Run conversion in a separate thread so the Tkinter UI doesn't freeze
         def run():
             try:
                 convert_html_to_pptx(html_file, ppt_file, mode, self.update_status)
@@ -286,7 +290,6 @@ class App:
             except Exception as e:
                 messagebox.showerror("Conversion Failed", f"An error occurred:\n{str(e)}")
             finally:
-                # Re-enable inputs
                 self.convert_btn.config(state="normal")
                 self.browse_html_btn.config(state="normal")
                 self.browse_ppt_btn.config(state="normal")
