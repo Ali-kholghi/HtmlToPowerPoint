@@ -1,0 +1,18 @@
+# Python files
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Output files
+*.pptx
+*.png
+*.jpg
+*.jpeg
+
+# OS files
+.DS_Store
+Thumbs.db
