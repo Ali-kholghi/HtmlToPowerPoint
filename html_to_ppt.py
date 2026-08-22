@@ -30,8 +30,8 @@ ctk.set_default_color_theme("blue")
 
 class UniversalHTMLConverter:
     """
-    Advanced engine that dynamically fits every individual slide to 16:9,
-    preventing both content clipping on tall pages and dead space on short pages.
+    Production-grade converter that preserves native HTML layouts,
+    prevents SVG/grid distortion, and mathematically centers every slide.
     """
 
     def __init__(self, status_callback, log_callback, progress_callback):
@@ -73,7 +73,7 @@ class UniversalHTMLConverter:
             page.goto(file_url, wait_until="networkidle", timeout=60000)
 
             # 2. Universal Pre-Flight
-            self.status_cb("Stabilizing fonts & disabling CSS transitions...")
+            self.status_cb("Stabilizing web fonts & styles...")
             self._universal_preflight(page)
             self.progress_cb(0.15)
 
@@ -85,10 +85,14 @@ class UniversalHTMLConverter:
             else:
                 self.log_cb(f"Selected strategy: [{selected_strategy.upper()}]")
 
-            # 4. Slide Processing Pipeline
+            # 4. Smart Capture
             raw_screenshots = []
-            if selected_strategy in ["presentation_deck", "revealjs", "marp", "section"]:
-                raw_screenshots = self._capture_slide_deck_normalized(page, viewport_w, viewport_h, selected_strategy)
+            if selected_strategy in ["presentation_deck", "section"]:
+                raw_screenshots = self._capture_element_slides(page)
+            elif selected_strategy == "revealjs":
+                raw_screenshots = self._capture_revealjs(page)
+            elif selected_strategy == "marp":
+                raw_screenshots = self._capture_marp(page)
             else:
                 raw_screenshots = self._capture_smart_dom_scroll(page, viewport_h)
 
@@ -102,13 +106,13 @@ class UniversalHTMLConverter:
             if not raw_screenshots:
                 raise RuntimeError("No visual content could be captured.")
 
-            # 5. Image Compression
+            # 5. Image Optimization
             self.status_cb("Optimizing image quality & file size...")
             self.progress_cb(0.85)
             processed_images = self._optimize_images(raw_screenshots, compression)
 
-            # 6. Assemble PowerPoint
-            self.status_cb("Assembling PowerPoint presentation...")
+            # 6. Assemble PowerPoint with Precision Centering
+            self.status_cb("Assembling PowerPoint slides...")
             self.progress_cb(0.92)
             self._build_powerpoint(processed_images, ppt_path, aspect_ratio)
 
@@ -117,7 +121,7 @@ class UniversalHTMLConverter:
             self.log_cb(f"Saved: {ppt_path}")
 
     def _universal_preflight(self, page):
-        """Disables animations, transitions, scrollbars, and waits for web fonts."""
+        """Universal stabilization: disables transitions, scrollbars, and waits for web fonts."""
         page.evaluate("""() => {
             const style = document.createElement('style');
             style.id = '__universal_converter_styles';
@@ -140,7 +144,7 @@ class UniversalHTMLConverter:
         except Exception:
             pass
 
-        # Trigger any lazy-loaded assets
+        # Trigger lazy-loaded assets
         page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); }")
         time.sleep(0.2)
         page.evaluate("() => { window.scrollTo(0, 0); }")
@@ -158,15 +162,14 @@ class UniversalHTMLConverter:
             return 'scroll';
         }""")
 
-    def _capture_slide_deck_normalized(self, page, viewport_w, viewport_h, strategy):
+    def _capture_element_slides(self, page):
         """
-        Processes every slide INDIVIDUALLY:
-        - If long: scales down proportionally using Chromium layout zoom (no cut-offs).
-        - If short: removes artificial min-height and centers content vertically (no empty voids).
+        Captures each slide element directly without altering its natural design,
+        preventing SVG blowups, squished multi-column grids, and clipping.
         """
-        self.log_cb("Initializing Dynamic Per-Slide Normalizer...")
+        self.log_cb("Using Element-Centric Capture Frame...")
 
-        # Prepare global DOM container for widescreen 16:9
+        # Hide floating toolbars/navbars that might contaminate captures
         page.evaluate("""() => {
             if (typeof togglePresentationMode === 'function' && !document.body.classList.contains('presentation-mode')) {
                 togglePresentationMode();
@@ -174,103 +177,79 @@ class UniversalHTMLConverter:
             const nav = document.querySelector('.presenter-nav, header, nav');
             if (nav) nav.style.display = 'none';
 
-            const containers = document.querySelectorAll('.container, main, [class*="container"]');
-            containers.forEach(c => {
-                c.style.maxWidth = '1820px';
-                c.style.width = '96%';
-                c.style.margin = '0 auto';
-                c.style.padding = '0px';
+            // Remove artificial min-height locks that force vertical voids
+            document.querySelectorAll('.slide-section, .slide, section').forEach(el => {
+                el.style.minHeight = 'auto';
+                el.style.marginBottom = '0px';
             });
         }""")
         time.sleep(0.2)
 
-        slides = page.locator(".slide-section, .slide, section, .marp-slide")
+        slides = page.locator(".slide-section, .slide, section, article")
         count = slides.count()
-        if count == 0:
-            count = page.evaluate("() => typeof Reveal !== 'undefined' ? Reveal.getTotalSlides() : 0")
-
         screenshots = []
 
         for i in range(count):
             if self.is_cancelled:
                 break
-            self.status_cb(f"Processing slide {i+1} of {count}...")
+            self.status_cb(f"Capturing slide {i+1} of {count}...")
             self.progress_cb(0.2 + (0.6 * (i / max(1, count))))
 
-            # Normalize and measure THIS specific slide independently
-            slide_stats = page.evaluate(f"""(idx) => {{
-                if (typeof Reveal !== 'undefined') {{
-                    Reveal.slide(idx);
-                }} else if (typeof showSlide === 'function') {{
+            # Make only current slide visible and scroll into view
+            page.evaluate(f"""(idx) => {{
+                if (typeof showSlide === 'function') {{
                     showSlide(idx);
                 }} else {{
-                    const els = document.querySelectorAll('.slide-section, .slide, section, .marp-slide');
+                    const els = document.querySelectorAll('.slide-section, .slide, section, article');
                     els.forEach((el, j) => {{
                         el.style.display = (j === idx) ? 'block' : 'none';
                     }});
                 }}
                 window.scrollTo(0, 0);
-
-                const active = document.querySelector('.active-slide') || document.querySelectorAll('.slide-section, .slide, section, .marp-slide')[idx];
-                if (!active) return {{ status: 'not_found' }};
-
-                // Reset all styling locks to measure true unconstrained dimensions
-                active.style.minHeight = 'auto';
-                active.style.maxHeight = 'none';
-                active.style.height = 'auto';
-                active.style.transform = 'none';
-                active.style.zoom = '1';
-                active.style.margin = '0 auto';
-                active.style.boxSizing = 'border-box';
-
-                // Calculate true content height from all child elements
-                let trueHeight = active.scrollHeight;
-                const children = active.children;
-                for (let j = 0; j < children.length; j++) {{
-                    const bottom = children[j].offsetTop + children[j].offsetHeight;
-                    if (bottom > trueHeight) trueHeight = bottom;
-                }}
-
-                const targetW = {viewport_w} - 60; // 30px side padding
-                const targetH = {viewport_h} - 50; // 25px top/bottom padding
-
-                let scale = 1.0;
-                if (trueHeight > targetH) {{
-                    // Long slide: scale to fit 100% without clipping
-                    scale = (targetH / trueHeight) * 0.98;
-                }}
-
-                // Apply layout zoom
-                active.style.zoom = `${{scale}}`;
-
-                // Calculate scaled height and center vertically if short
-                const scaledHeight = trueHeight * scale;
-                let topOffset = 10;
-                if (scaledHeight < targetH) {{
-                    topOffset = Math.max(10, Math.floor((targetH - scaledHeight) / 2));
-                }}
-                active.style.marginTop = `${{topOffset}}px`;
-                active.style.marginBottom = `${{topOffset}}px`;
-
-                return {{
-                    originalHeight: trueHeight,
-                    scale: scale,
-                    topOffset: topOffset
-                }};
             }}""", i)
+            time.sleep(0.2)
 
-            if slide_stats.get('scale', 1.0) < 0.99:
-                self.log_cb(f"Slide {i+1}: Tall ({slide_stats['originalHeight']}px) -> Scaled to {int(slide_stats['scale']*100)}% (Fitted)")
-            else:
-                self.log_cb(f"Slide {i+1}: Standard ({slide_stats['originalHeight']}px) -> Vertically Centered")
+            target_slide = page.locator(".active-slide").first
+            if target_slide.count() == 0:
+                target_slide = slides.nth(i)
 
-            time.sleep(0.15)
-            screenshots.append(page.screenshot(type="png", full_page=False))
+            # Capture the element directly (includes borders, shadows, backgrounds)
+            target_slide.scroll_into_view_if_needed()
+            screenshots.append(target_slide.screenshot(type="png"))
+            self.log_cb(f"Slide {i+1}: Captured in natural design layout.")
 
         return screenshots
 
+    def _capture_revealjs(self, page):
+        total_slides = page.evaluate("() => Reveal.getTotalSlides()")
+        screenshots = []
+        for i in range(total_slides):
+            if self.is_cancelled:
+                break
+            self.status_cb(f"Capturing slide {i+1} of {total_slides}...")
+            self.progress_cb(0.2 + (0.6 * (i / total_slides)))
+            page.evaluate(f"() => Reveal.slide({i})")
+            time.sleep(0.25)
+            screenshots.append(page.screenshot(type="png", full_page=False))
+        return screenshots
+
+    def _capture_marp(self, page):
+        slides = page.locator(".marpit > svg, .marp-slide")
+        count = slides.count()
+        screenshots = []
+        for i in range(count):
+            if self.is_cancelled:
+                break
+            self.status_cb(f"Capturing Marp slide {i+1} of {count}...")
+            self.progress_cb(0.2 + (0.6 * (i / count)))
+            slide = slides.nth(i)
+            slide.scroll_into_view_if_needed()
+            time.sleep(0.2)
+            screenshots.append(slide.screenshot(type="png"))
+        return screenshots
+
     def _capture_smart_dom_scroll(self, page, viewport_h):
-        """DOM-Aware Slicing: Only cuts between paragraphs/tables for long articles."""
+        """DOM-Aware Slicing: Only cuts between paragraphs/tables for continuous pages."""
         self.log_cb("Using DOM-Aware Slicing for continuous page...")
         total_height = page.evaluate("() => document.documentElement.scrollHeight || document.body.scrollHeight")
         current_scroll = 0
@@ -358,6 +337,10 @@ class UniversalHTMLConverter:
         return processed
 
     def _build_powerpoint(self, screenshots, ppt_path, aspect_ratio):
+        """
+        Builds the PowerPoint deck with mathematical 2D centering.
+        Leaves aesthetic breathing margins so slides look professional.
+        """
         prs = Presentation()
 
         if aspect_ratio == "16:9":
@@ -368,7 +351,10 @@ class UniversalHTMLConverter:
         prs.slide_width = Inches(slide_w_in)
         prs.slide_height = Inches(slide_h_in)
         blank_layout = prs.slide_layouts[6]
-        slide_ratio = slide_w_in / slide_h_in
+
+        # Use 94% of slide bounds for padding
+        max_target_w = slide_w_in * 0.94
+        max_target_h = slide_h_in * 0.94
 
         for img_bytes in screenshots:
             slide = prs.slides.add_slide(blank_layout)
@@ -378,16 +364,17 @@ class UniversalHTMLConverter:
                 img_w, img_h = img.size
                 img_ratio = img_w / img_h
 
-                if img_ratio > slide_ratio:
-                    disp_w = slide_w_in
-                    disp_h = slide_w_in / img_ratio
-                    left = 0
-                    top = (slide_h_in - disp_h) / 2
+                # Fit within available box preserving aspect ratio
+                if (max_target_w / img_ratio) <= max_target_h:
+                    disp_w = max_target_w
+                    disp_h = max_target_w / img_ratio
                 else:
-                    disp_h = slide_h_in
-                    disp_w = slide_h_in * img_ratio
-                    left = (slide_w_in - disp_w) / 2
-                    top = (slide_h_in - disp_h) / 2
+                    disp_h = max_target_h
+                    disp_w = max_target_h * img_ratio
+
+                # Mathematical centering on the PowerPoint canvas
+                left = (slide_w_in - disp_w) / 2
+                top = (slide_h_in - disp_h) / 2
 
             image_stream.seek(0)
             slide.shapes.add_picture(
@@ -407,7 +394,7 @@ class ModernApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Universal HTML to PowerPoint Studio v4")
+        self.title("Universal HTML to PowerPoint Studio v5")
         self.geometry("820x660")
         self.minsize(720, 580)
 
@@ -429,7 +416,7 @@ class ModernApp(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header_frame,
-            text="Per-Slide Dynamic Scaling • Auto-Centering • Zero Text Clipping",
+            text="Element-Centric Framing • Responsive Grid & SVG Protection • Precision 2D Centering",
             font=ctk.CTkFont(size=12),
             text_color="gray",
         )
@@ -454,6 +441,7 @@ class ModernApp(ctk.CTk):
         self.browse_ppt_btn = ctk.CTkButton(file_grid, text="Browse", width=90, command=self.browse_ppt)
         self.browse_ppt_btn.grid(row=1, column=2, pady=5)
 
+        # Options Row
         options_frame = ctk.CTkFrame(card, fg_color="transparent")
         options_frame.pack(fill="x", padx=15, pady=(0, 15))
 
